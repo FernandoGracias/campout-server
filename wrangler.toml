@@ -2,6 +2,9 @@ name = "campout-server"
 main = "src/index.js"
 compatibility_date = "2024-01-01"
 
+[vars]
+TURN_KEY_ID = "115b4afe9f6906020465cc46e027b1aa"
+
 [durable_objects]
 bindings = [
   { name = "ROOMS", class_name = "Room" }

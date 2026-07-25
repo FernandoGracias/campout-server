@@ -113,6 +113,22 @@ export default {
       return Response.json({ roomId, seed }, { headers: corsHeaders });
     }
 
+    if (path === "/turn-creds") {
+      const resp = await fetch(
+        `https://rtc.live.cloudflare.com/v1/turn/keys/${env.TURN_KEY_ID}/credentials/generate-ice-servers`,
+        {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${env.TURN_KEY_SECRET}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ ttl: 86400 }),
+        }
+      );
+      const data = await resp.json();
+      return Response.json(data, { headers: corsHeaders });
+    }
+
     const match = path.match(/^\/room\/([a-z0-9]+)/);
     if (match) {
       const roomId = match[1];
