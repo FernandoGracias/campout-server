@@ -3,6 +3,9 @@ export class Room {
     this.state = state;
     this.peers = new Map();
     this.seed = null;
+    this.state.blockConcurrencyWhile(async () => {
+      this.seed = await this.state.storage.get("seed") || null;
+    });
   }
 
   async fetch(request) {
@@ -36,7 +39,10 @@ export class Room {
       switch (msg.type) {
         case "join": {
           peerId = msg.id;
-          if (msg.seed && !this.seed) this.seed = msg.seed;
+          if (msg.seed && !this.seed) {
+            this.seed = msg.seed;
+            this.state.storage.put("seed", this.seed);
+          }
           this.peers.set(peerId, { ws, name: msg.name, color: msg.color, tentStyle: msg.tentStyle, tentColor: msg.tentColor });
           // Tell the joiner the seed
           if (this.seed) {
