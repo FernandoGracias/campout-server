@@ -2,6 +2,7 @@ export class Room {
   constructor(state, env) {
     this.state = state;
     this.peers = new Map();
+    this.seed = null;
   }
 
   async fetch(request) {
@@ -19,7 +20,7 @@ export class Room {
       for (const [id, peer] of this.peers) {
         peerList.push({ id, name: peer.name, color: peer.color });
       }
-      return Response.json({ peers: peerList });
+      return Response.json({ peers: peerList, seed: this.seed });
     }
 
     return new Response("Not found", { status: 404 });
@@ -35,7 +36,12 @@ export class Room {
       switch (msg.type) {
         case "join": {
           peerId = msg.id;
+          if (msg.seed && !this.seed) this.seed = msg.seed;
           this.peers.set(peerId, { ws, name: msg.name, color: msg.color, tentStyle: msg.tentStyle, tentColor: msg.tentColor });
+          // Tell the joiner the seed
+          if (this.seed) {
+            ws.send(JSON.stringify({ type: "room-info", seed: this.seed }));
+          }
           for (const [id, peer] of this.peers) {
             if (id !== peerId) {
               peer.ws.send(JSON.stringify({ type: "peer-joined", id: peerId, name: msg.name, color: msg.color, tentStyle: msg.tentStyle, tentColor: msg.tentColor }));
