@@ -13,3 +13,27 @@ bindings = [
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Room"]
+
+[[ratelimits]]
+name = "TURN_RATE_LIMITER"
+namespace_id = "1001"
+
+[ratelimits.simple]
+limit = 5
+period = 60
+
+[[ratelimits]]
+name = "CREATE_RATE_LIMITER"
+namespace_id = "1002"
+
+[ratelimits.simple]
+limit = 5
+period = 60
+
+[[ratelimits]]
+name = "JOIN_RATE_LIMITER"
+namespace_id = "1003"
+
+[ratelimits.simple]
+limit = 20
+period = 60
