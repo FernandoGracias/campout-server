@@ -3,7 +3,7 @@ const MAX_MESSAGE_SIZE = 16384;
 const TURN_TTL = 3600;
 const TURN_REFRESH_MS = 50 * 60 * 1000;
 const ROOM_IDLE_MS = 24 * 60 * 60 * 1000;
-const ALLOWED_ORIGIN = "https://fernandogracias.github.io";
+const ALLOWED_ORIGINS = new Set(["https://campout.team", "https://fernandogracias.github.io"]);
 const encoder = new TextEncoder();
 
 export class Room {
@@ -28,6 +28,9 @@ export class Room {
         await this.state.storage.setAlarm(Date.now() + ROOM_IDLE_MS);
         return Response.json(this.room);
       });
+    }
+    if (url.pathname === "/internal/exists") {
+      return new Response(null, { status: this.room ? 200 : 404 });
     }
     if (!this.room) return new Response("Room does not exist", { status: 404 });
     if (!/^\/api\/room\/[a-f0-9]{12}$/.test(url.pathname)) return new Response("Not found", { status: 404 });
@@ -249,14 +252,15 @@ export class Room {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    const origin = request.headers.get("Origin");
+    if (!ALLOWED_ORIGINS.has(origin)) return new Response("Forbidden", { status: 403 });
     const headers = {
-      "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
+      "Access-Control-Allow-Origin": origin,
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type",
       "Cache-Control": "no-store",
       "Vary": "Origin",
     };
-    if (request.headers.get("Origin") !== ALLOWED_ORIGIN) return new Response("Forbidden", { status: 403 });
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers });
     const ip = request.headers.get("CF-Connecting-IP");
     if (!ip) return new Response("Client address required", { status: 403, headers });
@@ -279,6 +283,13 @@ export default {
       if (!success) return new Response("Room join limit reached", { status: 429, headers });
       const roomId = url.pathname.split("/")[3];
       return env.ROOMS.get(env.ROOMS.idFromName(roomId)).fetch(request);
+    }
+    if (/^\/api\/room\/[a-f0-9]{12}\/exists$/.test(url.pathname)) {
+      if (request.method !== "GET") return new Response("GET required", { status: 405, headers });
+      const roomId = url.pathname.split("/")[3];
+      const stub = env.ROOMS.get(env.ROOMS.idFromName(roomId));
+      const resp = await stub.fetch(new Request("https://room/internal/exists"));
+      return new Response(null, { status: resp.ok ? 200 : 404, headers });
     }
     return new Response("Not found", { status: 404, headers });
   },
