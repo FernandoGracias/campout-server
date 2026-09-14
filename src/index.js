@@ -114,7 +114,7 @@ export class Room {
       if (!credentials || !this.connections.has(peer)) return;
       clearTimeout(peer.deadline);
       peer.deadline = setTimeout(() => this.closePeer(peer, 1008, "Ready timed out"), 30000);
-      this.send(peer, { type: "room-info", id: peer.id, seed: this.room.seed, ...credentials });
+      this.send(peer, { type: "room-info", id: peer.id, seed: this.room.seed, serverTime: Date.now(), ...credentials });
       return;
     }
     if (!peer.joined || this.peers.get(peer.id) !== peer) return this.closePeer(peer, 1008, "Join required");
