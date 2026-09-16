@@ -5,6 +5,8 @@ const TURN_REFRESH_MS = 50 * 60 * 1000;
 const ROOM_IDLE_MS = 24 * 60 * 60 * 1000;
 const ALLOWED_ORIGINS = new Set(["https://campout.team", "https://fernandogracias.github.io"]);
 const encoder = new TextEncoder();
+const MAX_ORBITING = 100;
+const MAX_PINECONES = 100;
 
 export class Room {
   constructor(state, env) {
@@ -13,8 +15,13 @@ export class Room {
     this.connections = new Set();
     this.peers = new Map();
     this.room = null;
+    // Projectile state: pinecone positions and orbiting projectiles
+    this.pinecones = null; // Array of {position, direction, available}
+    this.orbiting = [];    // Array of {kind, cone, position, velocity, orbit, launchTime}
     this.state.blockConcurrencyWhile(async () => {
       this.room = await this.state.storage.get("room") || null;
+      this.pinecones = await this.state.storage.get("pinecones") || null;
+      this.orbiting = await this.state.storage.get("orbiting") || [];
     });
   }
 
@@ -129,6 +136,10 @@ export class Room {
         if (Date.now() - peer.lastMessage > 120000) this.closePeer(peer, 1008, "Connection idle");
       }, 30000);
       this.send(peer, { type: "ready" });
+      // Send current projectile state to new joiner
+      if (this.pinecones || this.orbiting.length) {
+        this.send(peer, { type: "projectile-state", pinecones: this.pinecones, orbiting: this.orbiting, serverTime: Date.now() });
+      }
       for (const other of this.peers.values()) {
         if (other !== peer && other.ready) {
           this.send(other, this.peerInfo(peer));
@@ -144,6 +155,106 @@ export class Room {
       if (Date.now() < peer.refreshAt) return this.closePeer(peer, 1008, "TURN renewal not due");
       const credentials = await this.issueCredentials(peer);
       if (credentials) this.send(peer, { type: "turn-creds", ...credentials });
+      return;
+    }
+    // Projectile state sync messages
+    if (msg.type === "projectile-throw") {
+      // Validate throw data
+      if (!msg.data || !["snowball", "pinecone"].includes(msg.data.kind) ||
+          !Array.isArray(msg.data.position) || msg.data.position.length !== 3 ||
+          !Array.isArray(msg.data.velocity) || msg.data.velocity.length !== 3) {
+        return; // Silently ignore invalid
+      }
+      const projectile = {
+        kind: msg.data.kind,
+        cone: msg.data.cone ?? null,
+        position: msg.data.position,
+        velocity: msg.data.velocity,
+        orbit: msg.data.orbit || null,
+        launchTime: Date.now()
+      };
+      // Only track orbiting projectiles (those with orbit data)
+      if (projectile.orbit) {
+        this.orbiting.push(projectile);
+        // Enforce max orbiting limit
+        while (this.orbiting.length > MAX_ORBITING) {
+          this.orbiting.shift();
+        }
+        this.state.storage.put("orbiting", this.orbiting);
+      }
+      // If pinecone was picked up, mark it unavailable
+      if (msg.data.kind === "pinecone" && typeof msg.data.cone === "number" && this.pinecones) {
+        if (this.pinecones[msg.data.cone]) {
+          this.pinecones[msg.data.cone].available = false;
+          this.state.storage.put("pinecones", this.pinecones);
+        }
+      }
+      // Broadcast to all other peers
+      for (const other of this.peers.values()) {
+        if (other !== peer && other.ready) {
+          this.send(other, { type: "projectile-throw", from: peer.id, data: projectile });
+        }
+      }
+      return;
+    }
+    if (msg.type === "projectile-land") {
+      // Pinecone landed - update its position
+      if (typeof msg.cone !== "number" || !Array.isArray(msg.position) || msg.position.length !== 3) {
+        return;
+      }
+      // Remove from orbiting
+      const idx = this.orbiting.findIndex(p => p.kind === "pinecone" && p.cone === msg.cone);
+      if (idx !== -1) {
+        this.orbiting.splice(idx, 1);
+        this.state.storage.put("orbiting", this.orbiting);
+      }
+      // Update pinecone position
+      if (this.pinecones && this.pinecones[msg.cone]) {
+        this.pinecones[msg.cone].position = msg.position;
+        this.pinecones[msg.cone].direction = msg.direction || msg.position.map(v => v / Math.sqrt(msg.position.reduce((s, x) => s + x*x, 0)));
+        this.pinecones[msg.cone].available = true;
+        this.state.storage.put("pinecones", this.pinecones);
+      }
+      // Broadcast landing to all other peers
+      for (const other of this.peers.values()) {
+        if (other !== peer && other.ready) {
+          this.send(other, { type: "projectile-land", from: peer.id, cone: msg.cone, position: msg.position, direction: msg.direction });
+        }
+      }
+      return;
+    }
+    if (msg.type === "projectile-hit") {
+      // Snowball hit something and despawned, or pinecone hit and will bounce
+      // For snowballs, just remove from orbiting if it was there
+      if (msg.kind === "snowball" && msg.orbitIndex !== undefined) {
+        if (msg.orbitIndex >= 0 && msg.orbitIndex < this.orbiting.length) {
+          this.orbiting.splice(msg.orbitIndex, 1);
+          this.state.storage.put("orbiting", this.orbiting);
+        }
+      }
+      return;
+    }
+    if (msg.type === "pinecone-pickup") {
+      // Player picked up a pinecone
+      if (typeof msg.cone !== "number") return;
+      if (this.pinecones && this.pinecones[msg.cone]) {
+        this.pinecones[msg.cone].available = false;
+        this.state.storage.put("pinecones", this.pinecones);
+      }
+      // Broadcast to all other peers
+      for (const other of this.peers.values()) {
+        if (other !== peer && other.ready) {
+          this.send(other, { type: "pinecone-pickup", from: peer.id, cone: msg.cone });
+        }
+      }
+      return;
+    }
+    if (msg.type === "pinecone-state-init") {
+      // First player initializes pinecone state for the room
+      if (!this.pinecones && Array.isArray(msg.pinecones) && msg.pinecones.length <= MAX_PINECONES) {
+        this.pinecones = msg.pinecones;
+        this.state.storage.put("pinecones", this.pinecones);
+      }
       return;
     }
     if (!["offer", "answer", "ice-candidate", "restart-request"].includes(msg.type)) {
