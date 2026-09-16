@@ -1,4 +1,5 @@
 import { ProjectileWorld } from './projectiles.js';
+import { initialEnvironment, validEnvironmentChanges, advanceEnvironment } from './room-settings.js';
 
 const MAX_PEERS = 100;
 const MAX_MESSAGE_SIZE = 16384;
@@ -27,7 +28,8 @@ export class Room {
     if (url.pathname === "/internal/create" && request.method === "POST") {
       return this.state.blockConcurrencyWhile(async () => {
         if (this.room) return new Response("Room already exists", { status: 409 });
-        this.room = { seed: crypto.getRandomValues(new Uint32Array(1))[0] % 999999 };
+        const seed = crypto.getRandomValues(new Uint32Array(1))[0] % 999999;
+        this.room = { seed, ownerToken: crypto.randomUUID(), environment: initialEnvironment(seed) };
         await this.state.storage.put("room", this.room);
         await this.state.storage.setAlarm(Date.now() + ROOM_IDLE_MS);
         return Response.json(this.room);
@@ -115,13 +117,29 @@ export class Room {
         return this.closePeer(peer, 1008, "Invalid player details");
       }
       peer.joined = true;
+      // Legacy rooms can migrate their still-connected creator once. New rooms
+      // receive the ownership token only in the create response, never on join.
+      if (!this.room.ownerToken && msg.creator === true) {
+        this.room.ownerToken = crypto.randomUUID();
+        msg.ownerToken = this.room.ownerToken;
+      }
+      peer.canEditWorld = typeof msg.ownerToken === 'string' && msg.ownerToken === this.room.ownerToken;
+      if (!this.room.environment) {
+        this.room.environment = initialEnvironment(this.room.seed);
+        if (peer.canEditWorld && validEnvironmentChanges(msg.environment)) {
+          Object.assign(this.room.environment, msg.environment);
+        }
+      }
+      await this.state.storage.put('room', this.room);
       Object.assign(peer, { name: msg.name, color: msg.color, tentStyle: msg.tentStyle, tentColor: msg.tentColor });
       this.peers.set(peer.id, peer);
       const credentials = await this.issueCredentials(peer);
       if (!credentials || !this.connections.has(peer)) return;
       clearTimeout(peer.deadline);
       peer.deadline = setTimeout(() => this.closePeer(peer, 1008, "Ready timed out"), 30000);
-      this.send(peer, { type: "room-info", id: peer.id, seed: this.room.seed, serverTime: Date.now(), ...credentials });
+      this.send(peer, { type: "room-info", id: peer.id, seed: this.room.seed, serverTime: Date.now(), ...credentials,
+        environmentProtocol: 1, canEditWorld: peer.canEditWorld, environment: this.room.environment,
+        ...(peer.canEditWorld ? { ownerToken: this.room.ownerToken } : {}) });
       return;
     }
     if (!peer.joined || this.peers.get(peer.id) !== peer) return this.closePeer(peer, 1008, "Join required");
@@ -132,7 +150,8 @@ export class Room {
       peer.idleTimer = setInterval(() => {
         if (Date.now() - peer.lastMessage > 120000) this.closePeer(peer, 1008, "Connection idle");
       }, 30000);
-      this.send(peer, { type: "ready", projectileProtocol: 1 });
+      this.send(peer, { type: "ready", projectileProtocol: 1, pineconeFireProtocol: 1 });
+      this.send(peer, { type: 'room-environment', state: this.room.environment });
       await this.projectiles.run(async () => {
         await this.projectiles.settleBounces();
         this.projectiles.snapshot(peer);
@@ -147,6 +166,22 @@ export class Room {
     }
     if (!peer.ready) return this.closePeer(peer, 1008, "Ready required");
     if (msg.type === "ping") return this.send(peer, { type: "pong" });
+    if (msg.type === 'room-environment') {
+      if (!peer.canEditWorld || !validEnvironmentChanges(msg.changes)) {
+        this.send(peer, { type: 'room-environment', state: this.room.environment });
+        return;
+      }
+      await this.state.blockConcurrencyWhile(async () => {
+        const previous = this.room.environment;
+        this.room.environment = { ...advanceEnvironment(previous), ...msg.changes,
+          revision: previous.revision + 1, author: peer.id };
+        await this.state.storage.put('room', this.room);
+        for (const other of this.peers.values()) if (other.ready) {
+          this.send(other, { type: 'room-environment', state: this.room.environment });
+        }
+      });
+      return;
+    }
     if (msg.type === "leave") return this.closePeer(peer, 1000, "Left room");
     if (msg.type === "turn-refresh") {
       if (Date.now() < peer.refreshAt) return this.closePeer(peer, 1008, "TURN renewal not due");
@@ -155,7 +190,7 @@ export class Room {
       return;
     }
     if (["projectile-sync", "projectile-heartbeat", "projectile-throw", "projectile-checkpoint", "projectile-impact",
-        "pinecone-pickup", "pinecone-release"].includes(msg.type)) {
+        "pinecone-pickup", "pinecone-release", "pinecone-ignite"].includes(msg.type)) {
       return this.projectiles.run(() => this.projectiles.handle(peer, msg));
     }
     // Ignore obsolete client messages during a rolling frontend deployment.
@@ -287,8 +322,8 @@ export default {
       const stub = env.ROOMS.get(env.ROOMS.idFromName(roomId));
       const resp = await stub.fetch(new Request("https://room/internal/create", { method: "POST" }));
       if (!resp.ok) return new Response("Room creation failed", { status: resp.status, headers });
-      const { seed } = await resp.json();
-      return Response.json({ roomId, seed }, { headers });
+      const { seed, ownerToken } = await resp.json();
+      return Response.json({ roomId, seed, ownerToken }, { headers });
     }
     if (/^\/api\/room\/[a-f0-9]{12}$/.test(url.pathname)) {
       if (request.method !== "GET" || request.headers.get("Upgrade") !== "websocket") {
