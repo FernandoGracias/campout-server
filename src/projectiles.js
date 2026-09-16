@@ -217,7 +217,9 @@ export class ProjectileWorld {
       return;
     }
     if (msg.type === 'projectile-impact') {
-      if (peer.id !== this.authority() && msg.victim !== peer.id) return;
+      // Any client that detects swept contact can report it immediately.
+      // The first accepted impact resolves this flight; later reports find
+      // it removed (snowball) or already bouncing (pinecone) and cannot rescore.
       const p = this.data.projectiles.find(p => p.id === msg.id);
       if (!p || p.bounce || !vector(msg.position) || !Number.isSafeInteger(msg.step) || msg.step < 1 ||
           msg.step > Math.floor((Date.now() - p.launchTime) * 0.06) + 3) return;
