@@ -21,6 +21,33 @@ function validAnchors(anchors, position, kind) {
       (a.foot === null || point(a.foot) && distance(a.foot, a.point) <= 2.5 && distance(a.foot, position) <= 6)) &&
     distance(anchors[0].point, anchors[1].point) >= 0.5 && distance(anchors[0].point, anchors[1].point) <= 6.5;
 }
+const dot = (a, b) => a.reduce((sum, n, i) => sum + n * b[i], 0);
+const subtract = (a, b) => a.map((n, i) => n - b[i]);
+function lightEndpoints(object) {
+  if (object.anchors) return object.anchors.map(a => a.point);
+  const n = normal(object.position);
+  const q = 1 + n[1] < Number.EPSILON ? [0, 0, 1, 0] : normal([n[2], 0, -n[0], 1 + n[1]]);
+  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  return [-0.9, 0.9].map(x => {
+    const v = [x, 1.7, 0], uv = cross(q, v), uuv = cross(q, uv);
+    return v.map((value, i) => object.position[i] + value + 2 * (q[3] * uv[i] + uuv[i]));
+  });
+}
+function duplicateLightSpan(candidate, creations) {
+  const [a, b] = lightEndpoints(candidate), delta = subtract(b, a), length = Math.hypot(...delta);
+  return creations.some(object => {
+    if (object.kind !== 'lights') return false;
+    const [c, d] = lightEndpoints(object);
+    if (distance(a, c) < 0.35 && distance(b, d) < 0.35 || distance(a, d) < 0.35 && distance(b, c) < 0.35) return true;
+    const vector = subtract(d, c), oldLength = Math.hypot(...vector);
+    if (oldLength < 0.01 || length < 0.01) return false;
+    const axis = vector.map(n => n / oldLength);
+    if (Math.abs(dot(delta, axis) / length) < 0.96) return false;
+    const ac = subtract(a, c), bc = subtract(b, c), start = dot(ac, axis), end = dot(bc, axis);
+    if (Math.hypot(...ac.map((n, i) => n - start * axis[i])) > 0.35 || Math.hypot(...bc.map((n, i) => n - end * axis[i])) > 0.35) return false;
+    return Math.min(oldLength, Math.max(start, end)) - Math.max(0, Math.min(start, end)) > Math.min(oldLength, length) * 0.4;
+  });
+}
 
 // Matches world.js's existing circumnavigating river, including its meanders.
 // Finish by crossing the main lake back to the river mouth, not over land.
@@ -387,6 +414,7 @@ export class MinigameWorld {
     } else {
       if (!DECORATIONS[s.mode]?.includes(msg.kind) || !point(msg.position) || surfaceDistance(pose.position, msg.position) > 2) return;
       if (msg.anchors !== undefined && !validAnchors(msg.anchors, msg.position, msg.kind)) return;
+      if (msg.kind === 'lights' && duplicateLightSpan(msg, s.creations)) return this.reject(peer, 'There are already lights on that span. Choose another connection.');
       if (s.creations.length >= 100) return this.reject(peer, 'The world has 100 creations. Remove one to make room.');
       s.creations.push({ id: crypto.randomUUID(), kind: msg.kind, owner: peer.id, position: [...msg.position],
         ...(msg.anchors ? { anchors: msg.anchors.map(a => ({ point: [...a.point], foot: a.foot === null ? null : [...a.foot] })) } : {}) });

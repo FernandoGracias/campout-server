@@ -253,6 +253,28 @@ test('hanging decoration anchors are bounded, sanitized and preserved by room st
   assert.equal(f.game.data.creations.length, 1);
 });
 
+test('repeated and overlapping light spans are rejected while adjacent connections are allowed', async t => {
+  const f = fixture(t, 1);
+  f.game.start('christmas'); await f.pose(0, 0);
+  const place = (a, b) => f.send(0, { type: 'minigame-build', kind: 'lights', position: [0, 20, 0],
+    anchors: [{ point: [a, 21.7, 0], foot: null }, { point: [b, 21.7, 0], foot: null }] });
+  await place(-1, 1);
+  await place(-1, 1); await place(1, -1); await place(-0.5, 1.5);
+  assert.equal(f.game.data.creations.length, 1);
+  await place(1, 3);
+  assert.equal(f.game.data.creations.length, 2);
+  assert.ok(f.messages.some(m => m.type === 'minigame-notice' && m.message.includes('already lights')));
+});
+
+test('legacy freestanding strips also prevent duplicate placement on their recovered post tops', async t => {
+  const f = fixture(t, 1);
+  f.game.start('christmas'); await f.pose(0, 0);
+  await f.send(0, { type: 'minigame-build', kind: 'lights', position: [0, 20, 0] });
+  await f.send(0, { type: 'minigame-build', kind: 'lights', position: [0, 20, 0],
+    anchors: [{ point: [-0.9, 21.7, 0], foot: null }, { point: [0.9, 21.7, 0], foot: null }] });
+  assert.equal(f.game.data.creations.length, 1);
+});
+
 test('departure reassigns IT, removes ballots and ends a game without enough campers', async t => {
   const f = fixture(t, 3);
   f.game.start('tag');
