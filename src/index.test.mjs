@@ -96,7 +96,9 @@ test('room creation persists a server-selected seed and prevents overwrites', as
   assert.equal(resp.status, 200);
   const data = await resp.json();
   assert.match(data.roomId, /^[a-f0-9]{12}$/);
-  assert.deepEqual(stored.get('room'), { seed: data.seed });
+  assert.equal(stored.get('room').seed, data.seed);
+  assert.equal(stored.get('room').ownerToken, data.ownerToken);
+  assert.equal(stored.get('room').environment.winter, false);
   assert.equal((await room.fetch(new Request('https://room/internal/create', { method: 'POST' }))).status, 409);
 });
 

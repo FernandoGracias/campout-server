@@ -1,0 +1,207 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { MinigameWorld, iceRaceCourse } from './minigames.js';
+
+function fixture(t, count = 2, winter = false) {
+  let now = 100000;
+  t.mock.method(Date, 'now', () => now);
+  const stored = new Map(), messages = [], pending = [];
+  const room = {
+    room: { environment: { winter } }, peers: new Map(),
+    state: { storage: { get: async key => stored.get(key), put: async (key, value) => stored.set(key, structuredClone(value)) }, waitUntil: p => pending.push(p) },
+    send: (peer, message) => messages.push({ peer: peer.id, ...structuredClone(message) }),
+  };
+  const game = new MinigameWorld(room);
+  const peers = Array.from({ length: count }, (_, i) => ({ id: `p${i}`, name: `Camper ${i}`, ready: true, minigameActive: true, minigameTeam: i % 2 ? 'blue' : 'red' }));
+  for (const peer of peers) room.peers.set(peer.id, peer);
+  t.after(async () => { clearTimeout(game.timer); await Promise.all(pending); });
+  const advance = ms => { now += ms; game.tick(); };
+  const send = (i, msg) => game.run(() => game.handle(peers[i], { epoch: game.data.epoch, ...msg }));
+  const pose = (i, angle = i * 0.03, extra = {}) => send(i, { type: 'minigame-pose',
+    position: [Math.sin(angle) * 20, Math.cos(angle) * 20, 0], heading: [1, 0, 0], ...extra });
+  return { game, peers, room, stored, messages, advance, send, pose };
+}
+
+test('strict majority counts each connected camper once and expires without changing modes', async t => {
+  const f = fixture(t, 3);
+  await f.send(0, { type: 'minigame-vote', mode: 'tag' });
+  await f.send(0, { type: 'minigame-vote', mode: 'tag' });
+  assert.equal(f.game.data.vote.yes.length, 1);
+  assert.equal(f.game.data.mode, null);
+  await f.send(1, { type: 'minigame-vote', mode: 'tag' });
+  assert.equal(f.game.data.mode, 'tag');
+  await f.send(0, { type: 'minigame-vote', mode: 'camping' });
+  f.advance(30001);
+  assert.equal(f.game.data.vote, null);
+  assert.equal(f.game.data.mode, 'tag');
+  await f.send(0, { type: 'minigame-vote', mode: 'camping' });
+  await f.send(2, { type: 'minigame-vote', mode: 'camping' });
+  assert.equal(f.game.data.mode, null);
+});
+
+test('tag transfers only from IT at contact range and blocks immediate tag-backs and stale epochs', async t => {
+  const f = fixture(t, 3);
+  f.game.start('tag'); f.advance(5000);
+  await f.pose(0); await f.pose(1); await f.pose(2, 1);
+  await f.send(1, { type: 'minigame-contact', target: 'p0' });
+  assert.equal(f.game.data.it, 'p0');
+  await f.send(0, { type: 'minigame-contact', target: 'p2' });
+  assert.equal(f.game.data.it, 'p0');
+  await f.send(0, { type: 'minigame-contact', target: 'p1', epoch: -1 });
+  assert.equal(f.game.data.it, 'p0');
+  await f.send(0, { type: 'minigame-contact', target: 'p1' });
+  assert.equal(f.game.data.it, 'p1');
+  await f.send(1, { type: 'minigame-contact', target: 'p0' });
+  assert.equal(f.game.data.it, 'p1');
+  f.advance(1900); await f.pose(0); await f.pose(1);
+  await f.send(1, { type: 'minigame-contact', target: 'p0' });
+  assert.equal(f.game.data.it, 'p0');
+});
+
+test('freeze tag rescues teammates and awards exactly +1 / -1 when a whole team freezes', async t => {
+  const f = fixture(t, 4);
+  f.game.start('freeze-tag'); f.advance(5000);
+  for (let i = 0; i < 4; i++) await f.pose(i, i * 0.01);
+  assert.equal(f.game.data.roster.p0.team, f.game.data.roster.p2.team);
+  await f.send(1, { type: 'minigame-contact', target: 'p0' });
+  assert.equal(f.game.data.roster.p0.frozen, true);
+  await f.send(0, { type: 'minigame-contact', target: 'p1' });
+  assert.equal(f.game.data.roster.p1.frozen, false);
+  await f.send(2, { type: 'minigame-contact', target: 'p0' });
+  assert.equal(f.game.data.roster.p0.frozen, false);
+  f.advance(1600);
+  for (let i = 0; i < 4; i++) await f.pose(i, i * 0.01);
+  await f.send(1, { type: 'minigame-contact', target: 'p0' });
+  await f.send(1, { type: 'minigame-contact', target: 'p2' });
+  assert.deepEqual(f.game.data.scores, { red: -1, blue: 1 });
+  assert.equal(f.game.data.round, 2);
+  assert.equal(f.game.data.phase, 'countdown');
+  assert.ok(Object.values(f.game.data.roster).every(p => !p.frozen));
+  await f.send(1, { type: 'minigame-contact', target: 'p0' });
+  assert.deepEqual(f.game.data.scores, { red: -1, blue: 1 });
+});
+
+test('flashlight tag requires a lit beam aimed at the opponent', async t => {
+  const f = fixture(t);
+  f.game.start('flashlight-tag'); f.advance(5000);
+  await f.pose(0, 0); await f.pose(1, 0.2);
+  await f.send(0, { type: 'minigame-contact', target: 'p1' });
+  assert.equal(f.game.data.round, 1);
+  f.advance(100);
+  await f.pose(0, 0, { flashlight: true, heading: [-1, 0, 0] });
+  await f.send(0, { type: 'minigame-contact', target: 'p1' });
+  assert.equal(f.game.data.round, 1);
+  f.advance(100);
+  await f.pose(0, 0, { flashlight: true });
+  await f.send(0, { type: 'minigame-contact', target: 'p1' });
+  assert.equal(f.game.data.round, 2);
+  assert.deepEqual(f.game.data.scores, { red: 1, blue: -1 });
+});
+
+test('hide and seek protects hiding time, finds by contact and rotates seekers', async t => {
+  const f = fixture(t);
+  f.game.start('hide-seek');
+  await f.pose(0); await f.pose(1);
+  await f.send(0, { type: 'minigame-contact', target: 'p1' });
+  assert.equal(f.game.data.roster.p1.found, false);
+  f.advance(30000); await f.pose(0); await f.pose(1);
+  await f.send(0, { type: 'minigame-contact', target: 'p1' });
+  assert.equal(f.game.data.roster.p1.found, true);
+  assert.equal(f.game.data.roster.p0.score, 1);
+  assert.equal(f.game.data.phase, 'results');
+  f.advance(8000);
+  assert.equal(f.game.data.it, 'p1');
+  assert.equal(f.game.data.phase, 'hiding');
+  assert.equal(f.game.data.roster.p1.found, false);
+});
+
+test('winter race closes a full globe lap on the river and lake and rejects skipped checkpoints', async t => {
+  const f = fixture(t, 1, true), course = iceRaceCourse();
+  assert.ok(course.length > 50 && course.length < 100);
+  assert.deepEqual(course[0].map(n => Math.round(n * 1e8)), course.at(-1).map(n => Math.round(n * 1e8)));
+  let longitude = 0;
+  for (let i = 1; i < course.length; i++) {
+    const gap = Math.hypot(...course[i].map((n, k) => n - course[i - 1][k])) * 20;
+    assert.ok(gap < 2.1, `gap ${gap}`);
+    let delta = Math.atan2(course[i][2], course[i][0]) - Math.atan2(course[i - 1][2], course[i - 1][0]);
+    if (delta < -Math.PI) delta += Math.PI * 2;
+    if (delta > Math.PI) delta -= Math.PI * 2;
+    longitude += delta;
+  }
+  assert.ok(Math.abs(longitude - Math.PI * 2) < 1e-6);
+  await f.send(0, { type: 'minigame-vote', mode: 'race', course: [] });
+  assert.equal(f.game.data.iceRace, true);
+  f.advance(5000);
+  const report = p => f.send(0, { type: 'minigame-pose', position: p.map(n => n * 20), heading: [1, 0, 0], ice: true, skates: true });
+  await report(course[10]);
+  assert.equal(f.game.data.roster.p0.checkpoint, 0);
+  f.game.poses.clear();
+  for (const checkpoint of course) { f.advance(500); await report(checkpoint); }
+  assert.equal(f.game.data.roster.p0.checkpoint, course.length);
+  assert.ok(f.game.data.roster.p0.finish > 0);
+  assert.equal(f.game.data.phase, 'results');
+});
+
+test('winter race rejects land shortcuts and joining campers spectate the current race', async t => {
+  const f = fixture(t, 2, true);
+  f.game.start('race'); f.advance(5000);
+  await f.pose(0, 0, { ice: false });
+  assert.ok(f.messages.some(m => m.type === 'minigame-correction'));
+  const late = { id: 'late', name: 'Late', ready: true };
+  f.room.peers.set(late.id, late);
+  await f.game.handle(late, { type: 'minigame-sync', active: true });
+  assert.equal(f.game.data.roster.late.spectator, true);
+  f.room.room.environment.winter = false;
+  f.game.environmentChanged();
+  assert.equal(f.game.data.mode, null);
+});
+
+test('creations are bounded, persistent and cannot be deleted remotely or by another camper', async t => {
+  const f = fixture(t);
+  f.game.start('christmas'); await f.pose(0); await f.pose(1);
+  await f.send(0, { type: 'minigame-build', kind: 'script', position: [0, 20, 0] });
+  assert.equal(f.game.data.creations.length, 0);
+  await f.send(0, { type: 'minigame-build', kind: 'lights', position: [0, 20, 0] });
+  assert.equal(f.game.data.creations.length, 1);
+  const id = f.game.data.creations[0].id;
+  await f.send(1, { type: 'minigame-build', action: 'remove', id });
+  assert.equal(f.game.data.creations.length, 1);
+  f.game.end();
+  const restored = new MinigameWorld(f.room);
+  await restored.load();
+  assert.equal(restored.data.creations[0].id, id);
+  f.game.start('christmas'); await f.pose(0);
+  await f.send(0, { type: 'minigame-build', action: 'remove', id });
+  assert.equal(f.game.data.creations.length, 0);
+});
+
+test('snowballs need travel to grow, stay anchored after stacking, and are reclaimable after leaving', async t => {
+  const f = fixture(t, 1, true);
+  f.game.start('snowman'); await f.pose(0, 0, { snow: true });
+  await f.send(0, { type: 'minigame-build', action: 'snowball' });
+  const ball = f.game.data.creations[0];
+  await f.send(0, { type: 'minigame-build', action: 'snowball' });
+  assert.equal(ball.stage, 0);
+  for (let i = 1; i <= 25; i++) { f.advance(100); await f.pose(0, i * 0.02, { snow: true }); }
+  assert.equal(ball.growth, 1);
+  await f.send(0, { type: 'minigame-build', action: 'snowball' });
+  assert.equal(ball.stage, 1);
+  const base = [...ball.base];
+  f.advance(100); await f.pose(0, 0.52, { snow: true });
+  assert.deepEqual(ball.base, base);
+  f.game.end();
+  assert.equal(ball.holder, null);
+  f.game.start('snowman');
+  await f.send(0, { type: 'minigame-build', action: 'snowball' });
+  assert.equal(f.game.data.creations.length, 1);
+  assert.equal(ball.holder, 'p0');
+});
+
+test('departure reassigns IT, removes ballots and ends a game without enough campers', async t => {
+  const f = fixture(t, 3);
+  f.game.start('tag');
+  await f.game.disconnect(f.peers[0]);
+  assert.equal(f.game.data.it, 'p1');
+  await f.game.disconnect(f.peers[1]);
+  assert.equal(f.game.data.mode, null);
+});

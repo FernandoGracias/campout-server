@@ -1,4 +1,5 @@
 import { ProjectileWorld } from './projectiles.js';
+import { MinigameWorld } from './minigames.js';
 import { initialEnvironment, validEnvironmentChanges, advanceEnvironment } from './room-settings.js';
 
 const MAX_PEERS = 100;
@@ -17,9 +18,11 @@ export class Room {
     this.peers = new Map();
     this.room = null;
     this.projectiles = new ProjectileWorld(this);
+    this.minigames = new MinigameWorld(this);
     this.state.blockConcurrencyWhile(async () => {
       this.room = await this.state.storage.get("room") || null;
       await this.projectiles.load();
+      await this.minigames.load();
     });
   }
 
@@ -150,7 +153,7 @@ export class Room {
       peer.idleTimer = setInterval(() => {
         if (Date.now() - peer.lastMessage > 120000) this.closePeer(peer, 1008, "Connection idle");
       }, 30000);
-      this.send(peer, { type: "ready", projectileProtocol: 1, pineconeFireProtocol: 1 });
+      this.send(peer, { type: "ready", projectileProtocol: 1, pineconeFireProtocol: 1, minigameProtocol: 1 });
       this.send(peer, { type: 'room-environment', state: this.room.environment });
       await this.projectiles.run(async () => {
         await this.projectiles.settleBounces();
@@ -166,6 +169,9 @@ export class Room {
     }
     if (!peer.ready) return this.closePeer(peer, 1008, "Ready required");
     if (msg.type === "ping") return this.send(peer, { type: "pong" });
+    if (['minigame-sync', 'minigame-vote', 'minigame-pose', 'minigame-contact', 'minigame-build'].includes(msg.type)) {
+      return this.minigames.run(() => this.minigames.handle(peer, msg));
+    }
     if (msg.type === 'room-environment') {
       if (!peer.canEditWorld || !validEnvironmentChanges(msg.changes)) {
         this.send(peer, { type: 'room-environment', state: this.room.environment });
@@ -180,6 +186,7 @@ export class Room {
           this.send(other, { type: 'room-environment', state: this.room.environment });
         }
       });
+      await this.minigames.run(() => this.minigames.environmentChanged());
       return;
     }
     if (msg.type === "leave") return this.closePeer(peer, 1000, "Left room");
@@ -289,6 +296,7 @@ export class Room {
     clearInterval(peer.idleTimer);
     if (this.peers.get(peer.id) === peer) this.peers.delete(peer.id);
     this.state.waitUntil(this.projectiles.run(() => this.projectiles.disconnect(peer)));
+    this.state.waitUntil(this.minigames.run(() => this.minigames.disconnect(peer)));
     if (peer.ready) {
       for (const other of this.peers.values()) {
         if (other.ready) this.send(other, { type: "peer-left", id: peer.id });
