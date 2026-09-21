@@ -15,6 +15,12 @@ const distance = (a, b) => Math.hypot(...a.map((n, i) => n - b[i]));
 const normal = v => v.map(n => n / Math.hypot(...v));
 const surfaceDistance = (a, b) => distance(normal(a), normal(b)) * 20;
 const polar = (lat, lon) => [Math.cos(lat) * Math.cos(lon), Math.sin(lat), Math.cos(lat) * Math.sin(lon)];
+function validAnchors(anchors, position, kind) {
+  return ['lights', 'web'].includes(kind) && Array.isArray(anchors) && anchors.length === 2 &&
+    anchors.every(a => a && point(a.point) && distance(a.point, position) <= 6 &&
+      (a.foot === null || point(a.foot) && distance(a.foot, a.point) <= 2.5 && distance(a.foot, position) <= 6)) &&
+    distance(anchors[0].point, anchors[1].point) >= 0.5 && distance(anchors[0].point, anchors[1].point) <= 6.5;
+}
 
 // Matches world.js's existing circumnavigating river, including its meanders.
 // Finish by crossing the main lake back to the river mouth, not over land.
@@ -282,9 +288,11 @@ export class MinigameWorld {
     if (s.mode === 'snowman' && ball && old && pose.snow && now - old.at < 1000) {
       ball.growth = Math.min(1, (ball.growth || 0) + surfaceDistance(old.position, pose.position) / 8);
       ball.position = normal(pose.position.map((n, i) => n + pose.heading[i] * 0.85)).map(n => n * Math.hypot(...pose.position));
-      if (now - (this.lastGrowthPublish || 0) > 700) {
-        this.lastGrowthPublish = now;
-        this.publish();
+      if (now - (ball.lastMotionAt || 0) >= 100) {
+        ball.lastMotionAt = now;
+        const event = { type: 'minigame-snowball', epoch: s.epoch, revision: ++s.revision, serverTime: now,
+          id: ball.id, stage: ball.stage, holder: ball.holder, position: [...ball.position], growth: ball.growth };
+        for (const other of this.room.peers.values()) if (other.ready) this.send(other, event);
       }
     }
   }
@@ -378,8 +386,10 @@ export class MinigameWorld {
       }
     } else {
       if (!DECORATIONS[s.mode]?.includes(msg.kind) || !point(msg.position) || surfaceDistance(pose.position, msg.position) > 2) return;
+      if (msg.anchors !== undefined && !validAnchors(msg.anchors, msg.position, msg.kind)) return;
       if (s.creations.length >= 100) return this.reject(peer, 'The world has 100 creations. Remove one to make room.');
-      s.creations.push({ id: crypto.randomUUID(), kind: msg.kind, owner: peer.id, position: [...msg.position] });
+      s.creations.push({ id: crypto.randomUUID(), kind: msg.kind, owner: peer.id, position: [...msg.position],
+        ...(msg.anchors ? { anchors: msg.anchors.map(a => ({ point: [...a.point], foot: a.foot === null ? null : [...a.foot] })) } : {}) });
     }
     await this.room.state.storage.put('minigameCreations', s.creations.map(o => ({ ...o, holder: null })));
     this.publish();

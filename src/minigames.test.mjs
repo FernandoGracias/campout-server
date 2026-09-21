@@ -220,6 +220,39 @@ test('snowballs need travel to grow, stay anchored after stacking, and are recla
   assert.equal(ball.holder, 'p0');
 });
 
+test('rolling snowballs publish compact motion deltas at pose cadence, not full room snapshots', async t => {
+  const f = fixture(t, 1, true);
+  f.game.start('snowman'); await f.pose(0, 0, { snow: true });
+  await f.send(0, { type: 'minigame-build', action: 'snowball' });
+  const start = f.messages.length;
+  for (let i = 1; i <= 5; i++) { f.advance(120); await f.pose(0, i * 0.015, { snow: true }); }
+  const updates = f.messages.slice(start);
+  assert.equal(updates.filter(m => m.type === 'minigame-state').length, 0);
+  const deltas = updates.filter(m => m.type === 'minigame-snowball');
+  assert.equal(deltas.length, 5);
+  assert.equal(deltas[0].id, f.game.data.creations[0].id);
+  assert.ok(deltas[4].growth > deltas[0].growth);
+  assert.ok(deltas.every(m => m.epoch === f.game.data.epoch && m.stage === 0 && m.holder === 'p0'));
+});
+
+test('hanging decoration anchors are bounded, sanitized and preserved by room storage', async t => {
+  const f = fixture(t, 1);
+  f.game.start('christmas'); await f.pose(0, 0);
+  const anchors = [{ point: [-2, 21.5, 0], foot: null, ignored: 'strip me' }, { point: [2, 21.5, 0], foot: null }];
+  await f.send(0, { type: 'minigame-build', kind: 'lights', position: [0, 20, 0], anchors });
+  const object = f.game.data.creations[0];
+  assert.deepEqual(object.anchors, anchors.map(({ point, foot }) => ({ point, foot })));
+  const restored = new MinigameWorld(f.room); await restored.load();
+  assert.deepEqual(restored.data.creations[0].anchors, object.anchors);
+  for (const bad of [[], [anchors[0]], [...anchors, anchors[0]], [{ point: [40, 20, 0], foot: null }, anchors[1]],
+    [{ point: [0, 21, 0], foot: [0, 17, 0] }, anchors[1]], [{ point: [0, 21, null], foot: null }, anchors[1]]]) {
+    await f.send(0, { type: 'minigame-build', kind: 'lights', position: [0, 20, 0], anchors: bad });
+    assert.equal(f.game.data.creations.length, 1);
+  }
+  await f.send(0, { type: 'minigame-build', kind: 'ornament', position: [0, 20, 0], anchors });
+  assert.equal(f.game.data.creations.length, 1);
+});
+
 test('departure reassigns IT, removes ballots and ends a game without enough campers', async t => {
   const f = fixture(t, 3);
   f.game.start('tag');
