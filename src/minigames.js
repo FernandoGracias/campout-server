@@ -25,12 +25,25 @@ export function iceRaceCourse() {
     const lat = 0.8 - 0.6 * t + Math.sin(t * Math.PI * 6) * 0.2 + Math.sin(t * Math.PI * 14) * 0.08 + Math.sin(t * Math.PI * 3) * 0.12;
     const lon = 1.2 + Math.PI * 2 * t + Math.cos(t * Math.PI * 5) * 0.15 + Math.cos(t * Math.PI * 11) * 0.05 + Math.cos(t * Math.PI * 2.5) * 0.1;
     const p = polar(lat, lon);
-    if (!path.length || distance(path.at(-1), p) * 20 >= 1.65 || i === 500) path.push(p);
+    path.push(p);
   }
   const end = path.at(-1), start = path[0];
   const steps = Math.ceil(distance(end, start) * 20 / 1.65);
   for (let i = 1; i <= steps; i++) path.push(normal(end.map((n, k) => n + (start[k] - n) * i / steps)));
-  return path;
+  // Twelve fixed flag sites, spaced by distance along the waterway. Choose
+  // existing river samples rather than interpolating across its bends. The
+  // thirteenth entry is the return to the shared start/finish flag after a lap.
+  const lengths = [0];
+  for (let i = 1; i < path.length; i++) lengths.push(lengths[i - 1] + distance(path[i - 1], path[i]) * 20);
+  const course = [start];
+  let index = 1;
+  for (let checkpoint = 1; checkpoint < 12; checkpoint++) {
+    const target = lengths.at(-1) * checkpoint / 12;
+    while (lengths[index] < target) index++;
+    course.push(path[target - lengths[index - 1] < lengths[index] - target ? index - 1 : index]);
+  }
+  course.push([...start]);
+  return course;
 }
 
 function validCourse(course, mode) {
@@ -240,10 +253,11 @@ export class MinigameWorld {
     if (old && member && (member.frozen || member.found || s.mode === 'hide-seek' && s.it === peer.id && s.phase === 'hiding') &&
         surfaceDistance(old.position, msg.position) > 0.4) return;
     const pose = { position: [...msg.position], heading: [...msg.heading], at: now,
-      flashlight: msg.flashlight === true, ice: msg.ice === true, skates: msg.skates === true, snow: msg.snow === true };
+      flashlight: msg.flashlight === true, ice: msg.ice === true, skates: msg.skates === true, snow: msg.snow === true, sledding: msg.sledding === true };
     this.poses.set(peer.id, pose);
     if (!member || member.spectator) return;
     if (['race', 'sledding'].includes(s.mode) && s.phase === 'playing' && member.finish === null) {
+      if (s.mode === 'sledding' && (!pose.sledding || !pose.skates)) return;
       if (s.iceRace && (!pose.ice || !pose.skates)) {
         if (!member.offTrack) {
           member.offTrack = true;

@@ -117,12 +117,12 @@ test('hide and seek protects hiding time, finds by contact and rotates seekers',
 
 test('winter race closes a full globe lap on the river and lake and rejects skipped checkpoints', async t => {
   const f = fixture(t, 1, true), course = iceRaceCourse();
-  assert.ok(course.length > 50 && course.length < 100);
+  assert.equal(course.length, 13); // Twelve fixed sites; start is also finish.
   assert.deepEqual(course[0].map(n => Math.round(n * 1e8)), course.at(-1).map(n => Math.round(n * 1e8)));
   let longitude = 0;
   for (let i = 1; i < course.length; i++) {
     const gap = Math.hypot(...course[i].map((n, k) => n - course[i - 1][k])) * 20;
-    assert.ok(gap < 2.1, `gap ${gap}`);
+    assert.ok(gap > 5 && gap < 18, `widely spaced checkpoints: ${gap}`);
     let delta = Math.atan2(course[i][2], course[i][0]) - Math.atan2(course[i - 1][2], course[i - 1][0]);
     if (delta < -Math.PI) delta += Math.PI * 2;
     if (delta > Math.PI) delta -= Math.PI * 2;
@@ -136,7 +136,14 @@ test('winter race closes a full globe lap on the river and lake and rejects skip
   await report(course[10]);
   assert.equal(f.game.data.roster.p0.checkpoint, 0);
   f.game.poses.clear();
-  for (const checkpoint of course) { f.advance(500); await report(checkpoint); }
+  const originalCourse = structuredClone(f.game.data.course);
+  for (let i = 0; i < course.length; i++) {
+    f.advance(3000); await report(course[i]);
+    assert.equal(f.game.data.roster.p0.checkpoint, i + 1);
+    for (let repeat = 0; repeat < 5; repeat++) { f.advance(100); await report(course[i]); }
+    assert.equal(f.game.data.roster.p0.checkpoint, i + 1, 'Standing on a crossed flag cannot advance again');
+    assert.deepEqual(f.game.data.course, originalCourse, 'Progress never creates or moves checkpoints');
+  }
   assert.equal(f.game.data.roster.p0.checkpoint, course.length);
   assert.ok(f.game.data.roster.p0.finish > 0);
   assert.equal(f.game.data.phase, 'results');
@@ -154,6 +161,22 @@ test('winter race rejects land shortcuts and joining campers spectate the curren
   f.room.room.environment.winter = false;
   f.game.environmentChanged();
   assert.equal(f.game.data.mode, null);
+});
+
+test('sled checkpoints pause on dismount and resume only with sled and skate mode enabled', async t => {
+  const f = fixture(t, 1, true);
+  const course = [0, 0.1, 0.2, 0.3].map(a => [Math.sin(a), Math.cos(a), 0]);
+  f.game.start('sledding', course); f.advance(5000);
+  await f.pose(0, 0, { skates: true, sledding: false });
+  assert.equal(f.game.data.roster.p0.checkpoint, 0);
+  f.advance(100); await f.pose(0, 0, { skates: false, sledding: true });
+  assert.equal(f.game.data.roster.p0.checkpoint, 0);
+  f.advance(100); await f.pose(0, 0, { skates: true, sledding: true });
+  assert.equal(f.game.data.roster.p0.checkpoint, 1);
+  f.advance(1000); await f.pose(0, 0.1, { skates: false, sledding: false });
+  assert.equal(f.game.data.roster.p0.checkpoint, 1);
+  f.advance(100); await f.pose(0, 0.1, { skates: true, sledding: true });
+  assert.equal(f.game.data.roster.p0.checkpoint, 2);
 });
 
 test('creations are bounded, persistent and cannot be deleted remotely or by another camper', async t => {
