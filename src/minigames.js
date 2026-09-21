@@ -1,7 +1,8 @@
 // The room owns ballots, roles, rounds, checkpoints and shared creations.
 // Terrain/line-of-sight are simulated by browsers, like projectile collisions;
 // identity, timing, range, beam angle and score changes are validated here.
-const MODES = new Set(['tag', 'freeze-tag', 'hide-seek', 'sledding', 'race', 'christmas', 'halloween', 'snowman', 'flashlight-tag']);
+import { ghostNight, ghostPosition, makeGhosts } from './ghost-game.js';
+const MODES = new Set(['tag', 'freeze-tag', 'hide-seek', 'sledding', 'race', 'christmas', 'halloween', 'snowman', 'flashlight-tag', 'ghost-catching']);
 const TEAM_MODES = new Set(['freeze-tag', 'flashlight-tag']);
 const ACTIVITIES = new Set(['christmas', 'halloween', 'snowman']);
 const DECORATIONS = {
@@ -96,8 +97,9 @@ export class MinigameWorld {
     this.queue = Promise.resolve();
     this.timer = null;
     this.poses = new Map();
+    this.ghostCaptures = new Map();
     this.data = { revision: 0, epoch: 0, mode: null, phase: 'idle', vote: null,
-      roster: {}, scores: { red: 0, blue: 0 }, creations: [], course: [], round: 0 };
+      roster: {}, scores: { red: 0, blue: 0 }, creations: [], course: [], ghosts: [], round: 0 };
   }
   async load() {
     const saved = await this.room.state.storage.get('minigameCreations');
@@ -125,6 +127,7 @@ export class MinigameWorld {
     clearTimeout(this.timer);
     this.timer = null;
     const deadlines = [this.data.vote?.expiresAt,
+      this.data.vote?.mode === 'ghost-catching' ? ghostNight(this.room.room.environment).sunrise : null,
       this.data.phase === 'countdown' || this.data.phase === 'hiding' ? this.data.startsAt : null,
       this.data.mode && !ACTIVITIES.has(this.data.mode) ? this.data.endsAt : null].filter(Number.isFinite);
     if (!deadlines.length) return;
@@ -135,10 +138,13 @@ export class MinigameWorld {
   tick() {
     const s = this.data, now = Date.now();
     if (s.vote && now >= s.vote.expiresAt) { s.vote = null; this.publish('Minigame vote expired.'); }
+    const night = ghostNight(this.room.room.environment, now);
+    if (s.vote?.mode === 'ghost-catching' && !night.night) { s.vote = null; this.publish('Ghost catching is only available at night (18:00–06:00).'); }
     if (!s.mode) return;
+    if (s.mode === 'ghost-catching' && !night.night) return this.end(`Dawn! Ghost catching ended. Red ${s.scores.red} · Blue ${s.scores.blue}.`);
     if (['countdown', 'hiding'].includes(s.phase) && now >= s.startsAt) {
       s.phase = s.mode === 'hide-seek' ? 'seeking' : 'playing';
-      s.endsAt = ['race', 'sledding'].includes(s.mode) ? now + 180000 : s.mode === 'hide-seek' ? now + 180000 : null;
+      s.endsAt = ['race', 'sledding'].includes(s.mode) ? now + 180000 : s.mode === 'hide-seek' ? now + 180000 : s.mode === 'ghost-catching' ? night.sunrise : null;
       this.publish(s.mode === 'hide-seek' ? 'Ready or not — the seeker is coming!' : 'Go!');
     }
     if (s.endsAt && now >= s.endsAt) {
@@ -154,9 +160,10 @@ export class MinigameWorld {
     this.schedule();
   }
   end(message = 'Back to camping.') {
+    this.ghostCaptures.clear();
     this.releaseCreations();
     Object.assign(this.data, { mode: null, phase: 'idle', roster: {}, course: [], vote: null,
-      it: null, iceRace: false, startsAt: null, endsAt: null, epoch: this.data.epoch + 1 });
+      it: null, iceRace: false, ghosts: [], startsAt: null, endsAt: null, epoch: this.data.epoch + 1 });
     this.publish(message);
   }
   releaseCreations(holder = null) {
@@ -169,6 +176,12 @@ export class MinigameWorld {
   environmentChanged() {
     const s = this.data, winter = this.room.room.environment?.winter === true;
     if ((s.mode === 'sledding' || s.mode === 'snowman') && !winter || s.mode === 'race' && winter !== s.iceRace) this.end('The season changed. Back to camping.');
+    if (s.mode === 'ghost-catching') {
+      const night = ghostNight(this.room.room.environment);
+      if (!night.night) return this.end(`Daylight! Ghost catching ended. Red ${s.scores.red} · Blue ${s.scores.blue}.`);
+      s.endsAt = night.sunrise; this.publish();
+    }
+    if (s.vote?.mode === 'ghost-catching') this.tick();
   }
   member(peer, spectator = false) {
     const counts = { red: 0, blue: 0 };
@@ -178,11 +191,15 @@ export class MinigameWorld {
     return { name: peer.name, team, frozen: false, found: false, spectator, score: 0, checkpoint: 0, finish: null, safeUntil: 0 };
   }
   start(mode, course) {
+    if (mode === 'ghost-catching' && !ghostNight(this.room.room.environment).night) {
+      this.data.vote = null; return this.publish('Ghost catching is only available at night (18:00–06:00).');
+    }
+    this.ghostCaptures.clear();
     this.releaseCreations();
     const s = this.data;
     const iceRace = mode === 'race' && this.room.room.environment?.winter === true;
     Object.assign(s, { mode, vote: null, scores: { red: 0, blue: 0 }, roster: {}, it: null,
-      course: iceRace ? iceRaceCourse() : course || [], iceRace, round: 0, epoch: s.epoch + 1 });
+      course: iceRace ? iceRaceCourse() : course || [], ghosts: mode === 'ghost-catching' ? makeGhosts(Date.now() + 5000) : [], iceRace, round: 0, epoch: s.epoch + 1 });
     for (const peer of this.players()) s.roster[peer.id] = this.member(peer);
     this.newRound();
   }
@@ -194,7 +211,7 @@ export class MinigameWorld {
     if (s.mode === 'tag' || s.mode === 'hide-seek') s.it = ids[(s.round - 1) % ids.length];
     s.phase = ACTIVITIES.has(s.mode) ? 'playing' : s.mode === 'hide-seek' ? 'hiding' : 'countdown';
     s.startsAt = Date.now() + (s.mode === 'hide-seek' ? 30000 : 5000);
-    s.endsAt = null;
+    s.endsAt = s.mode === 'ghost-catching' ? ghostNight(this.room.room.environment).sunrise : null;
     this.publish(s.phase === 'hiding' ? 'Hide! The seeker has 30 seconds to count.' : `Round ${s.round}${s.phase === 'countdown' ? ' starts in 5 seconds.' : ' started.'}`);
   }
   evaluateVote() {
@@ -205,13 +222,14 @@ export class MinigameWorld {
     vote.eligible = ids;
     if (vote.yes.length <= ids.length / 2) return;
     if (vote.mode === 'camping') return this.end();
-    if (ids.length < 2 && !ACTIVITIES.has(vote.mode) && !['race', 'sledding'].includes(vote.mode)) {
+    if (ids.length < 2 && !ACTIVITIES.has(vote.mode) && !['race', 'sledding', 'ghost-catching'].includes(vote.mode)) {
       this.data.vote = null;
       return this.publish('This game needs at least two campers.');
     }
     this.start(vote.mode, vote.course);
   }
   async disconnect(peer) {
+    this.releaseGhostCapture(peer.id);
     this.releaseCreations(peer.id);
     peer.minigameActive = false;
     this.poses.delete(peer.id);
@@ -219,7 +237,7 @@ export class MinigameWorld {
     delete s.roster[peer.id];
     if (!this.players().length) return this.end();
     this.evaluateVote();
-    if (s.mode && !ACTIVITIES.has(s.mode) && !['race', 'sledding'].includes(s.mode)) {
+    if (s.mode && !ACTIVITIES.has(s.mode) && !['race', 'sledding', 'ghost-catching'].includes(s.mode)) {
       if (Object.keys(s.roster).length < 2 || TEAM_MODES.has(s.mode) &&
           !['red', 'blue'].every(team => Object.values(s.roster).some(p => p.team === team))) return this.end('Not enough campers to continue.');
       if (s.it === peer.id) {
@@ -256,6 +274,7 @@ export class MinigameWorld {
       if (!MODES.has(msg.mode) && msg.mode !== 'camping') return;
       if (msg.mode === s.mode || msg.mode === 'camping' && !s.mode) return;
       if (s.vote && s.vote.mode !== msg.mode) return this.reject(peer, 'Finish the current vote first. Select its menu entry to vote yes.');
+      if (msg.mode === 'ghost-catching' && !ghostNight(this.room.room.environment).night) return this.reject(peer, 'Ghost catching is only available at night (18:00–06:00).');
       if (msg.mode === 'sledding' || msg.mode === 'snowman') {
         if (!this.room.room.environment?.winter) return this.reject(peer, 'This activity needs winter. The world creator can enable it.');
       }
@@ -274,6 +293,7 @@ export class MinigameWorld {
     if (msg.epoch !== s.epoch || !s.mode || !s.roster[peer.id] || s.roster[peer.id].spectator) return;
     if (msg.type === 'minigame-contact') return this.contact(peer, msg.target);
     if (msg.type === 'minigame-build') return this.build(peer, msg);
+    if (msg.type === 'minigame-ghost-vacuum') return this.vacuumGhost(peer, msg.target);
   }
   pose(peer, msg) {
     const now = Date.now(), old = this.poses.get(peer.id), s = this.data;
@@ -286,8 +306,9 @@ export class MinigameWorld {
     if (old && member && (member.frozen || member.found || s.mode === 'hide-seek' && s.it === peer.id && s.phase === 'hiding') &&
         surfaceDistance(old.position, msg.position) > 0.4) return;
     const pose = { position: [...msg.position], heading: [...msg.heading], at: now,
-      flashlight: msg.flashlight === true, ice: msg.ice === true, skates: msg.skates === true, snow: msg.snow === true, sledding: msg.sledding === true };
+      flashlight: msg.flashlight === true, ice: msg.ice === true, skates: msg.skates === true, snow: msg.snow === true, sledding: msg.sledding === true, vacuum: msg.vacuum === true };
     this.poses.set(peer.id, pose);
+    if (!pose.vacuum) this.releaseGhostCapture(peer.id);
     if (!member || member.spectator) return;
     if (['race', 'sledding'].includes(s.mode) && s.phase === 'playing' && member.finish === null) {
       if (s.mode === 'sledding' && (!pose.sledding || !pose.skates)) return;
@@ -355,6 +376,32 @@ export class MinigameWorld {
       this.publish(`${target.name} was found.`);
       this.checkRound();
     }
+  }
+  releaseGhostCapture(id, except = null) {
+    for (const [ghost, capture] of this.ghostCaptures) if (capture.owner === id && ghost !== except) this.ghostCaptures.delete(ghost);
+  }
+  vacuumGhost(peer, targetId) {
+    const s = this.data, now = Date.now();
+    this.releaseGhostCapture(peer.id, targetId);
+    const ghost = s.ghosts.find(g => g.id === targetId), pose = this.poses.get(peer.id), member = s.roster[peer.id];
+    if (s.mode !== 'ghost-catching' || s.phase !== 'playing' || !ghostNight(this.room.room.environment, now).night ||
+        !ghost || ghost.hiddenUntil > now || !pose?.vacuum || now - pose.at > 600 || !member || member.spectator) {
+      this.releaseGhostCapture(peer.id); return;
+    }
+    const origin = pose.position.map((n, i) => n + normal(pose.position)[i] * 0.8);
+    const toward = subtract(ghostPosition(ghost, now), origin), range = Math.hypot(...toward);
+    if (range > 10 || range < 0.1 || dot(normal(toward), pose.heading) < 0.96) { this.releaseGhostCapture(peer.id); return; }
+    let capture = this.ghostCaptures.get(targetId);
+    if (capture && capture.owner !== peer.id && now - capture.last < 450) return;
+    if (!capture || capture.owner !== peer.id || now - capture.last > 450) {
+      capture = { owner: peer.id, since: now, last: now }; this.ghostCaptures.set(targetId, capture);
+    }
+    capture.last = now;
+    if (now - capture.since < 1200) return;
+    ghost.hiddenUntil = now + 12000;
+    this.ghostCaptures.delete(targetId);
+    s.scores[member.team]++; member.score++;
+    this.publish(`${member.name} caught a ghost! ${member.team === 'red' ? 'Red' : 'Blue'} +1.`);
   }
   checkRound() {
     const s = this.data;

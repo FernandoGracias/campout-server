@@ -169,7 +169,7 @@ export class Room {
     }
     if (!peer.ready) return this.closePeer(peer, 1008, "Ready required");
     if (msg.type === "ping") return this.send(peer, { type: "pong" });
-    if (['minigame-sync', 'minigame-vote', 'minigame-pose', 'minigame-contact', 'minigame-build'].includes(msg.type)) {
+    if (['minigame-sync', 'minigame-vote', 'minigame-pose', 'minigame-contact', 'minigame-build', 'minigame-ghost-vacuum'].includes(msg.type)) {
       return this.minigames.run(() => this.minigames.handle(peer, msg));
     }
     if (msg.type === 'room-environment') {

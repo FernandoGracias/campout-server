@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { MinigameWorld, iceRaceCourse } from './minigames.js';
+import { ghostNight } from './ghost-game.js';
 
 function fixture(t, count = 2, winter = false) {
   let now = 100000;
@@ -282,4 +283,78 @@ test('departure reassigns IT, removes ballots and ends a game without enough cam
   assert.equal(f.game.data.it, 'p1');
   await f.game.disconnect(f.peers[1]);
   assert.equal(f.game.data.mode, null);
+});
+
+test('ghost catching is night-only and ends at dawn without changing room time', async t => {
+  const f = fixture(t, 1);
+  f.room.room.environment = { hour: 12, at: Date.now(), rate: 0.04, paused: true };
+  await f.send(0, { type: 'minigame-vote', mode: 'ghost-catching' });
+  assert.equal(f.game.data.mode, null);
+  assert.ok(f.messages.some(m => m.type === 'minigame-notice' && m.message.includes('only available at night')));
+  f.room.room.environment.hour = 23;
+  await f.send(0, { type: 'minigame-vote', mode: 'ghost-catching' });
+  assert.equal(f.game.data.mode, 'ghost-catching');
+  assert.equal(f.game.data.ghosts.length, 18);
+  assert.equal(f.room.room.environment.hour, 23);
+  f.advance(5000);
+  assert.equal(f.game.data.phase, 'playing');
+  f.room.room.environment = { hour: 5.99, at: Date.now(), rate: 0.04, paused: false };
+  f.game.environmentChanged();
+  f.advance(300);
+  assert.equal(f.game.data.mode, null);
+  assert.equal(f.game.data.ghosts.length, 0);
+  assert.equal(ghostNight({ hour: 18, at: Date.now(), paused: true }).night, true);
+  assert.equal(ghostNight({ hour: 6, at: Date.now(), paused: true }).night, false);
+});
+
+test('suction requires sustained in-range aim and awards one team point per captured ghost', async t => {
+  const f = fixture(t, 2);
+  f.room.room.environment = { hour: 23, at: Date.now(), rate: 0.04, paused: true };
+  f.game.start('ghost-catching'); f.advance(5000);
+  const ghost = f.game.data.ghosts[0];
+  Object.assign(ghost, { at: Date.now(), latitude: 0, phase: 0, speed: 0 });
+  await f.pose(0, Math.PI / 2, { vacuum: false });
+  await f.send(0, { type: 'minigame-ghost-vacuum', target: ghost.id });
+  assert.equal(f.game.ghostCaptures.size, 0);
+  for (let i = 0; i < 7; i++) {
+    f.advance(200); await f.pose(0, Math.PI / 2, { vacuum: true });
+    await f.send(0, { type: 'minigame-ghost-vacuum', target: ghost.id });
+    await f.pose(1, Math.PI / 2, { vacuum: true });
+    await f.send(1, { type: 'minigame-ghost-vacuum', target: ghost.id });
+    if (i < 6) assert.equal(f.game.data.scores.red, 0);
+  }
+  assert.equal(f.game.data.scores.red, 1);
+  assert.equal(f.game.data.scores.blue, 0);
+  assert.ok(ghost.hiddenUntil > Date.now());
+  f.advance(200); await f.pose(1, Math.PI / 2, { vacuum: true });
+  await f.send(1, { type: 'minigame-ghost-vacuum', target: ghost.id });
+  assert.deepEqual(f.game.data.scores, { red: 1, blue: 0 });
+});
+
+test('ghost suction rejects range/aim/stale-epoch violations and interruption resets progress', async t => {
+  const f = fixture(t, 1);
+  f.room.room.environment = { hour: 23, at: Date.now(), rate: 0.04, paused: true };
+  f.game.start('ghost-catching'); f.advance(5000);
+  const ghost = f.game.data.ghosts[0];
+  Object.assign(ghost, { at: Date.now(), latitude: 0, phase: 0, speed: 0 });
+  await f.pose(0, 0, { vacuum: true });
+  await f.send(0, { type: 'minigame-ghost-vacuum', target: ghost.id });
+  assert.equal(f.game.ghostCaptures.size, 0);
+  f.game.poses.clear(); f.advance(200);
+  await f.pose(0, Math.PI / 2, { vacuum: true, heading: [-1, 0, 0] });
+  await f.send(0, { type: 'minigame-ghost-vacuum', target: ghost.id });
+  assert.equal(f.game.ghostCaptures.size, 0);
+  f.advance(200); await f.pose(0, Math.PI / 2, { vacuum: true });
+  await f.send(0, { type: 'minigame-ghost-vacuum', target: ghost.id, epoch: -1 });
+  assert.equal(f.game.ghostCaptures.size, 0);
+  await f.send(0, { type: 'minigame-ghost-vacuum', target: ghost.id });
+  assert.equal(f.game.ghostCaptures.size, 1);
+  f.advance(600); await f.pose(0, Math.PI / 2, { vacuum: false });
+  assert.equal(f.game.ghostCaptures.size, 0);
+  f.advance(200); await f.pose(0, Math.PI / 2, { vacuum: true });
+  await f.send(0, { type: 'minigame-ghost-vacuum', target: ghost.id });
+  f.advance(700);
+  await f.send(0, { type: 'minigame-ghost-vacuum', target: ghost.id });
+  assert.equal(f.game.ghostCaptures.size, 0, 'stale pose cannot continue capture');
+  assert.equal(f.game.data.scores.red, 0);
 });
