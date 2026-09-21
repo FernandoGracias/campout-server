@@ -17,10 +17,11 @@ const normal = v => v.map(n => n / Math.hypot(...v));
 const surfaceDistance = (a, b) => distance(normal(a), normal(b)) * 20;
 const polar = (lat, lon) => [Math.cos(lat) * Math.cos(lon), Math.sin(lat), Math.cos(lat) * Math.sin(lon)];
 function validAnchors(anchors, position, kind) {
-  return ['lights', 'web'].includes(kind) && Array.isArray(anchors) && anchors.length === 2 &&
+  return ['lights', 'web'].includes(kind) && Array.isArray(anchors) && anchors.length >= 2 && anchors.length <= (kind === 'web' ? 8 : 2) &&
     anchors.every(a => a && point(a.point) && distance(a.point, position) <= 6 &&
       (a.foot === null || point(a.foot) && distance(a.foot, a.point) <= 2.5 && distance(a.foot, position) <= 6)) &&
-    distance(anchors[0].point, anchors[1].point) >= 0.5 && distance(anchors[0].point, anchors[1].point) <= 6.5;
+    distance(anchors[0].point, anchors[1].point) >= 0.5 &&
+    anchors.every((a, i) => anchors.slice(i + 1).every(b => distance(a.point, b.point) >= 0.12 && distance(a.point, b.point) <= 6.5));
 }
 const dot = (a, b) => a.reduce((sum, n, i) => sum + n * b[i], 0);
 const subtract = (a, b) => a.map((n, i) => n - b[i]);

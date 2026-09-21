@@ -254,6 +254,19 @@ test('hanging decoration anchors are bounded, sanitized and preserved by room st
   assert.equal(f.game.data.creations.length, 1);
 });
 
+test('webs preserve a bounded set of real attachment corners instead of requiring only two endpoints', async t => {
+  const f = fixture(t, 1);
+  f.game.start('halloween'); await f.pose(0, 0);
+  const anchors = [[-1, 21.5, 0], [1, 21.5, 0], [0, 20, 0]].map(point => ({ point, foot: null }));
+  await f.send(0, { type: 'minigame-build', kind: 'web', position: [0, 20, 0], anchors });
+  assert.deepEqual(f.game.data.creations[0].anchors, anchors);
+  for (const invalid of [Array.from({ length: 9 }, (_, i) => ({ point: [i / 4 - 1, 21, 0], foot: null })),
+    [...anchors, anchors[0]], [...anchors, { point: [0, 27, 0], foot: null }]]) {
+    await f.send(0, { type: 'minigame-build', kind: 'web', position: [0, 20, 0], anchors: invalid });
+    assert.equal(f.game.data.creations.length, 1);
+  }
+});
+
 test('repeated and overlapping light spans are rejected while adjacent connections are allowed', async t => {
   const f = fixture(t, 1);
   f.game.start('christmas'); await f.pose(0, 0);
